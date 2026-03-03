@@ -1,0 +1,9 @@
+# Zig build outputs
+.zig-cache/
+zig-out/
+
+# macOS
+.DS_Store
+
+# Local runtime data
+scores.txt
