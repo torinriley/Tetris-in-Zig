@@ -29,15 +29,19 @@ jobs:
             binary: tetris.exe
             archive: tetris-windows-x86_64.zip
 
-          - os: macos-13
-            artifact_name: tetris-macos-x86_64
-            binary: tetris
-            archive: tetris-macos-x86_64.tar.gz
-
+          # Both macOS targets run on the ARM runner.
+          # aarch64 = native build; x86_64 = Zig cross-compile with x86_64 raylib.
           - os: macos-latest
             artifact_name: tetris-macos-aarch64
             binary: tetris
             archive: tetris-macos-aarch64.tar.gz
+            zig_target: ""
+
+          - os: macos-latest
+            artifact_name: tetris-macos-x86_64
+            binary: tetris
+            archive: tetris-macos-x86_64.tar.gz
+            zig_target: x86_64-macos
 
     steps:
       - name: Checkout
@@ -48,7 +52,7 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      # ── Linux: build Raylib from source and install to /usr/local ──
+      # ── Linux: build Raylib from source → /usr/local ──
       - name: Install Raylib (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -80,14 +84,35 @@ jobs:
           Write-Host "Raylib installed to C:\raylib"
           Get-ChildItem C:\raylib -Recurse | Select-Object FullName
 
-      # ── macOS: install via Homebrew ──
-      - name: Install Raylib (macOS)
-        if: runner.os == 'macOS'
+      # ── macOS (native aarch64): install via Homebrew ──
+      - name: Install Raylib (macOS native)
+        if: runner.os == 'macOS' && matrix.zig_target == ''
         run: brew install raylib
 
+      # ── macOS (cross-compile → x86_64): build raylib for x86_64 from source ──
+      - name: Install Raylib (macOS x86_64 cross)
+        if: runner.os == 'macOS' && matrix.zig_target == 'x86_64-macos'
+        run: |
+          brew install cmake
+          git clone --depth 1 --branch ${{ env.RAYLIB_VERSION }} \
+            https://github.com/raysan5/raylib.git /tmp/raylib
+          cmake -S /tmp/raylib -B /tmp/raylib/build \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_INSTALL_PREFIX=/tmp/raylib-x86_64
+          cmake --build /tmp/raylib/build --target install -j$(sysctl -n hw.logicalcpu)
+
       # ── Build ──
-      - name: Build
+      - name: Build (native)
+        if: matrix.zig_target == ''
         run: zig build -Doptimize=ReleaseFast
+
+      - name: Build (cross-compile x86_64-macos)
+        if: matrix.zig_target == 'x86_64-macos'
+        run: |
+          export PKG_CONFIG_PATH=/tmp/raylib-x86_64/lib/pkgconfig
+          zig build -Dtarget=x86_64-macos -Doptimize=ReleaseFast
 
       # ── Package ──
       - name: Package (Windows)
@@ -144,14 +169,12 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          # Get all commits since the last release tag (or last 10 if no tag)
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -n "$LAST_TAG" ]; then
             LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s (%h)" --no-merges)
           else
             LOG=$(git log --pretty=format:"- %s (%h)" --no-merges -10)
           fi
-          # Escape for GitHub output
           {
             echo "log<<EOF"
             echo "$LOG"
@@ -185,8 +208,8 @@ jobs:
             |----------|-------------|------|
             | Windows | x86-64 | `tetris-windows-x86_64.zip` |
             | Linux | x86-64 | `tetris-linux-x86_64.tar.gz` |
-            | macOS | Intel (x86-64) | `tetris-macos-x86_64.tar.gz` |
             | macOS | Apple Silicon (ARM64) | `tetris-macos-aarch64.tar.gz` |
+            | macOS | Intel (x86-64) | `tetris-macos-x86_64.tar.gz` |
 
             ---
 
@@ -209,12 +232,12 @@ jobs:
             tar -xzf tetris-macos-*.tar.gz
             chmod +x tetris
             ./tetris
-            # If blocked by Gatekeeper: System Settings → Privacy → Open Anyway
+            # If blocked by Gatekeeper: System Settings → Privacy & Security → Open Anyway
             ```
 
             ---
 
-            > This is an automated nightly build and may be unstable.
+            > Automated nightly build — may be unstable.
             > Compiled with **Zig ${{ env.ZIG_VERSION }}** · **Raylib ${{ env.RAYLIB_VERSION }}**
           files: |
             artifacts/*.zip
