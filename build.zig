@@ -31,6 +31,13 @@ pub fn build(b: *std.Build) void {
         exe.linkSystemLibrary("X11");
     } else {
         exe.linkSystemLibrary("raylib");
+        exe.linkFramework("Cocoa");
+        exe.linkFramework("CoreFoundation");
+        exe.linkFramework("CoreGraphics");
+        exe.linkFramework("CoreVideo");
+        exe.linkFramework("IOKit");
+        exe.linkFramework("OpenGL");
+        exe.linkFramework("Carbon");
     }
 
     b.installArtifact(exe);
