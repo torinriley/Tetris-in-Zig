@@ -9,7 +9,9 @@ const CellSize: i32 = 32;
 const OffsetX: i32 = 40;
 const OffsetY: i32 = 40;
 const FallIntervalStart: f32 = 0.55;
-const ClearAnimDuration: f32 = 0.14;
+const DasDelay: f32 = 0.17;
+const ArrRate: f32 = 0.05;
+const ClearAnimDuration: f32 = 0.35;
 const ScoreFilePath = "scores.txt";
 const BgColor = c.BLACK;
 const TermGreen = c.RAYWHITE;
@@ -17,7 +19,15 @@ const TermDim = c.LIGHTGRAY;
 const TermDark = c.GRAY;
 
 const ShapeType = enum(u8) { I, O, T, S, Z, J, L };
-const Scene = enum { Menu, Playing, Scores };
+const Scene = enum { Intro, Menu, Playing, Scores };
+
+const IntroState = struct {
+    timer: f32,
+    done: bool,
+};
+
+const VirtualW: f32 = 560.0;
+const VirtualH: f32 = 730.0;
 
 const Vec2i = struct {
     x: i32,
@@ -59,6 +69,8 @@ const Game = struct {
     clear_anim_timer: f32,
     clearing_rows: [4]i32,
     clearing_count: u8,
+    das_left: f32,
+    das_right: f32,
 };
 
 const piece_defs = [_]PieceDef{
@@ -394,6 +406,8 @@ fn initGame() Game {
         .clear_anim_timer = 0,
         .clearing_rows = [_]i32{0} ** 4,
         .clearing_count = 0,
+        .das_left = 0,
+        .das_right = 0,
     };
 
     game.current.t = randomShape(game.rng.random());
@@ -447,22 +461,68 @@ fn drawBoard(game: *const Game) void {
     }
 
     if (game.clear_anim_active) {
-        const alpha: f32 = if (@mod(@as(i32, @intFromFloat(game.clear_anim_timer * 1000.0)), 2) == 0)
-            0.75
-        else
-            0.35;
+        const progress: f32 = 1.0 - game.clear_anim_timer / ClearAnimDuration;
+
         for (0..@as(usize, @intCast(game.clearing_count))) |i| {
             const row = game.clearing_rows[i];
-            c.DrawRectangle(OffsetX, OffsetY + row * CellSize, BoardW * CellSize, CellSize, c.ColorAlpha(c.RAYWHITE, alpha));
+            const row_y: i32 = OffsetY + row * CellSize;
+
+            if (progress < 0.25) {
+                // Phase 1: Bright flash with expanding glow
+                const t: f32 = progress / 0.25;
+                const glow: i32 = @intFromFloat(4.0 * (1.0 - t));
+                c.DrawRectangle(
+                    OffsetX - glow,
+                    row_y - glow,
+                    BoardW * CellSize + glow * 2,
+                    CellSize + glow * 2,
+                    c.ColorAlpha(c.RAYWHITE, 0.3 * (1.0 - t)),
+                );
+                c.DrawRectangle(OffsetX, row_y, BoardW * CellSize, CellSize, c.ColorAlpha(c.RAYWHITE, 1.0 - t * 0.4));
+            } else {
+                // Phase 2: Center-out dissolve with shrinking cells
+                c.DrawRectangle(OffsetX, row_y, BoardW * CellSize, CellSize, c.BLACK);
+
+                const sweep: f32 = (progress - 0.25) / 0.75;
+                const half: f32 = @as(f32, @floatFromInt(BoardW)) * 0.5;
+
+                for (0..BoardW) |col_u| {
+                    const col: i32 = @intCast(col_u);
+                    const col_f: f32 = @as(f32, @floatFromInt(col)) + 0.5;
+                    const dist: f32 = @abs(col_f - half) / half;
+                    const cell_x: i32 = OffsetX + col * CellSize;
+
+                    const col_start: f32 = dist * 0.5;
+                    if (sweep > col_start) {
+                        // Cell shrinks and fades out
+                        const cp: f32 = @min(1.0, (sweep - col_start) / 0.5);
+                        const scale: f32 = 1.0 - cp;
+                        const size_f: f32 = @as(f32, @floatFromInt(CellSize)) * scale;
+                        const size: i32 = @intFromFloat(size_f);
+                        const off: i32 = @divTrunc(CellSize - size, 2);
+                        if (size > 1) {
+                            c.DrawRectangle(cell_x + off, row_y + off, size, size, c.ColorAlpha(c.RAYWHITE, 0.3 + 0.7 * scale));
+                        }
+                    } else {
+                        // Still waiting — draw original cell with white glow overlay
+                        const cell = game.board[@as(usize, @intCast(row))][@as(usize, @intCast(col))];
+                        const base_color = if (cell != 0) colorForCell(cell) else c.RAYWHITE;
+                        c.DrawRectangle(cell_x, row_y, CellSize, CellSize, base_color);
+                        c.DrawRectangle(cell_x, row_y, CellSize, CellSize, c.ColorAlpha(c.RAYWHITE, 0.35));
+                    }
+                }
+            }
         }
     }
 
-    const blocks = pieceBlocks(game.current);
-    const color = piece_defs[shapeIndex(game.current.t)].color;
-    for (blocks) |b| {
-        const x = game.current.x + b.x;
-        const y = game.current.y + b.y;
-        if (y >= 0) drawCell(x, y, color);
+    if (!game.clear_anim_active) {
+        const blocks = pieceBlocks(game.current);
+        const color = piece_defs[shapeIndex(game.current.t)].color;
+        for (blocks) |b| {
+            const x = game.current.x + b.x;
+            const y = game.current.y + b.y;
+            if (y >= 0) drawCell(x, y, color);
+        }
     }
 }
 
@@ -515,97 +575,239 @@ fn drawSidePanel(game: *const Game, save_data: *const SaveData) void {
     }
 }
 
-fn drawAsciiTitle(base_x: i32, base_y: i32, color: c.Color) void {
-    const lines = [_][*:0]const u8{
-        "ZZZZZZ  TTTTTT  EEEEEE  TTTTTT  RRRRR   IIIIII   SSSSS ",
-        "    ZZ    TT    EE        TT    RR  RR    II    SS     ",
-        "   ZZ     TT    EEEEE     TT    RRRRR     II     SSSS  ",
-        "  ZZ      TT    EE        TT    RR  RR    II        SS ",
-        "ZZZZZZ    TT    EEEEEE    TT    RR   RR IIIIII  SSSSS  ",
+fn drawIntro(intro: *const IntroState) void {
+    const t = intro.timer;
+    const w: i32 = @intFromFloat(VirtualW);
+    const center_x: i32 = @divTrunc(w, 2);
+
+    // Title
+    const title: [*:0]const u8 = "ZTETRIS";
+    const title_size: i32 = 52;
+    const title_w = c.MeasureText(title, title_size);
+    c.DrawText(title, center_x - @divTrunc(title_w, 2), 60, title_size, TermGreen);
+
+    // Thin accent line
+    c.DrawRectangle(center_x - 100, 122, 200, 1, c.ColorAlpha(TermGreen, 0.25));
+
+    // Boot-sequence lines with staggered fade-in
+    const boot_lines = [_][*:0]const u8{
+        "> BIOS CHECK ............. OK",
+        "> MEMORY 64K ............. OK",
+        "> BLOCK ENGINE v1.0 ...... OK",
+        "> LOADING TETROMINOS ..... OK",
+        "> GRAVITY MODULE ......... OK",
+        "> LINE CLEAR SUBSYSTEM ... OK",
+        "> INITIALIZING GRID ...... OK",
     };
-    const font = c.GetFontDefault();
-    const font_size: f32 = 17;
-    const char_step: i32 = 9;
-    for (lines, 0..) |line, i| {
-        const row_y = base_y + @as(i32, @intCast(i)) * 24;
-        const text = std.mem.span(line);
-        for (text, 0..) |ch, col| {
-            if (ch == ' ') continue;
-            c.DrawTextCodepoint(
-                font,
-                @as(i32, ch),
-                c.Vector2{
-                    .x = @floatFromInt(base_x + @as(i32, @intCast(col)) * char_step),
-                    .y = @floatFromInt(row_y),
-                },
-                font_size,
-                color,
-            );
-        }
+    const line_delay: f32 = 0.30;
+
+    for (boot_lines, 0..) |line, i| {
+        const appear_at: f32 = @as(f32, @floatFromInt(i)) * line_delay;
+        if (t < appear_at) break;
+
+        const lp: f32 = @min(1.0, (t - appear_at) / line_delay);
+        const alpha: f32 = if (lp < 0.3) lp / 0.3 else 1.0;
+        const y_pos: i32 = 160 + @as(i32, @intCast(i)) * 34;
+
+        c.DrawText(line, 80, y_pos, 18, c.ColorAlpha(TermGreen, alpha));
     }
+
+    // Spinner
+    const spinner = [_]u8{ '|', '/', '-', '\\' };
+    const spin_idx: usize = @intFromFloat(@mod(t * 8.0, 4.0));
+    c.DrawTextCodepoint(c.GetFontDefault(), @as(i32, spinner[spin_idx]), c.Vector2{ .x = 80, .y = 430 }, 18, TermGreen);
+
+    // Progress bar — thin and modern
+    const total_dur: f32 = @as(f32, @floatFromInt(boot_lines.len)) * line_delay + 0.5;
+    const bar_prog: f32 = @min(1.0, t / total_dur);
+    const bar_w: i32 = 300;
+    const bar_x: i32 = center_x - @divTrunc(bar_w, 2);
+    const bar_y: i32 = 470;
+
+    c.DrawRectangle(bar_x, bar_y, bar_w, 3, c.ColorAlpha(TermDark, 0.2));
+    const filled: i32 = @intFromFloat(@as(f32, @floatFromInt(bar_w)) * bar_prog);
+    if (filled > 0) {
+        c.DrawRectangle(bar_x, bar_y, filled, 3, TermGreen);
+    }
+
+    // Percentage
+    var pct_buf: [16]u8 = undefined;
+    const pct: i32 = @intFromFloat(bar_prog * 100.0);
+    const pct_txt = std.fmt.bufPrintZ(&pct_buf, "{d}%%", .{pct}) catch "";
+    const pct_w = c.MeasureText(pct_txt.ptr, 16);
+    c.DrawText(pct_txt.ptr, center_x - @divTrunc(pct_w, 2), bar_y + 14, 16, c.ColorAlpha(TermGreen, 0.6));
+
+    // Blinking cursor
+    if (@mod(t, 1.0) < 0.55) {
+        c.DrawText("_", 80, 520, 20, TermGreen);
+    }
+
+    // Skip hint
+    const skip: [*:0]const u8 = "PRESS ANY KEY TO SKIP";
+    const skip_w = c.MeasureText(skip, 16);
+    c.DrawText(skip, center_x - @divTrunc(skip_w, 2), 630, 16, c.ColorAlpha(TermDim, 0.25 + 0.2 * @abs(@sin(t * 2.5))));
 }
 
 fn drawMenu(menu_idx: i32, save_data: *const SaveData) void {
-    const options = [_][*:0]const u8{ "Start Game", "Scores", "Quit" };
+    const options = [_][*:0]const u8{ "START GAME", "SCORES", "QUIT" };
+    const w: i32 = @intFromFloat(VirtualW);
+    const center_x: i32 = @divTrunc(w, 2);
 
-    drawAsciiTitle(54, 78, TermGreen);
+    // Title — same style as loading screen
+    const title: [*:0]const u8 = "ZTETRIS";
+    const title_size: i32 = 52;
+    const title_w = c.MeasureText(title, title_size);
+    c.DrawText(title, center_x - @divTrunc(title_w, 2), 60, title_size, TermGreen);
 
+    // Thin accent line
+    c.DrawRectangle(center_x - 100, 122, 200, 1, c.ColorAlpha(TermGreen, 0.25));
+
+    const logo_end_y: i32 = 130;
+
+    // Subtitle
+    const tagline: [*:0]const u8 = "blocks fall, lines clear";
+    const tag_w = c.MeasureText(tagline, 18);
+    c.DrawText(tagline, center_x - @divTrunc(tag_w, 2), logo_end_y + 16, 18, c.ColorAlpha(TermDim, 0.35));
+
+    // Separator
+    c.DrawRectangle(center_x - 120, logo_end_y + 54, 240, 1, c.ColorAlpha(TermDark, 0.25));
+
+    // Menu options
+    const menu_start_y: i32 = logo_end_y + 100;
     for (options, 0..) |opt, i| {
         const selected = menu_idx == @as(i32, @intCast(i));
-        const color = if (selected) TermGreen else TermDim;
-        const marker: [*:0]const u8 = if (selected) ">" else ".";
-        const y = 290 + @as(i32, @intCast(i)) * 52;
-        c.DrawText(marker, 160, y, 34, color);
-        c.DrawText(opt, 196, y, 34, color);
+        const y = menu_start_y + @as(i32, @intCast(i)) * 62;
+        const text_size: i32 = 28;
+        const text_w = c.MeasureText(opt, text_size);
+        const text_x = center_x - @divTrunc(text_w, 2);
+
+        if (selected) {
+            c.DrawRectangle(center_x - 120, y - 10, 240, 46, c.ColorAlpha(TermGreen, 0.06));
+            c.DrawRectangle(center_x - 120, y - 10, 2, 46, c.ColorAlpha(TermGreen, 0.4));
+            c.DrawText(opt, text_x, y, text_size, TermGreen);
+        } else {
+            c.DrawText(opt, text_x, y, text_size, c.ColorAlpha(TermDim, 0.3));
+        }
     }
 
+    // Separator
+    const menu_end_y: i32 = menu_start_y + 3 * 62;
+    c.DrawRectangle(center_x - 120, menu_end_y + 16, 240, 1, c.ColorAlpha(TermDark, 0.25));
+
+    // Stats
     var stats_buf: [80]u8 = undefined;
-    const best = std.fmt.bufPrintZ(&stats_buf, "Best score: {d}", .{save_data.top_scores[0]}) catch "";
-    c.DrawText(best.ptr, 180, 500, 28, TermGreen);
+    const best = std.fmt.bufPrintZ(&stats_buf, "BEST: {d}", .{save_data.top_scores[0]}) catch "";
+    const best_w = c.MeasureText(best.ptr, 22);
+    c.DrawText(best.ptr, center_x - @divTrunc(best_w, 2), menu_end_y + 44, 22, c.ColorAlpha(TermGreen, 0.6));
 
-    const games = std.fmt.bufPrintZ(&stats_buf, "Games played: {d}", .{save_data.games_played}) catch "";
-    c.DrawText(games.ptr, 180, 534, 24, TermDim);
+    const games = std.fmt.bufPrintZ(&stats_buf, "GAMES: {d}", .{save_data.games_played}) catch "";
+    const games_w = c.MeasureText(games.ptr, 16);
+    c.DrawText(games.ptr, center_x - @divTrunc(games_w, 2), menu_end_y + 76, 16, c.ColorAlpha(TermDim, 0.3));
 
-    c.DrawText("UP/DOWN SELECT  ENTER CONFIRM", 110, 640, 22, TermDim);
+    // Controls hint — pinned near bottom of virtual canvas
+    const hint: [*:0]const u8 = "UP / DOWN  Select    ENTER  Confirm";
+    const hint_w = c.MeasureText(hint, 16);
+    const hint_y: i32 = @as(i32, @intFromFloat(VirtualH)) - 104;
+    c.DrawText(hint, center_x - @divTrunc(hint_w, 2), hint_y, 16, c.ColorAlpha(TermDim, 0.25));
+
+    // Version
+    const ver: [*:0]const u8 = "v1.0  //  Zig + Raylib";
+    const ver_w = c.MeasureText(ver, 14);
+    c.DrawText(ver, center_x - @divTrunc(ver_w, 2), hint_y + 38, 14, c.ColorAlpha(TermDark, 0.25));
 }
 
 fn drawScores(save_data: *const SaveData) void {
-    c.DrawText("ZTETRIS :: HIGH SCORES", 96, 90, 42, TermGreen);
+    const w: i32 = @intFromFloat(VirtualW);
+    const center_x: i32 = @divTrunc(w, 2);
 
+    // title — centered
+    const title: [*:0]const u8 = "HIGH  SCORES";
+    const title_w = c.MeasureText(title, 38);
+    c.DrawText(title, center_x - @divTrunc(title_w, 2), 80, 38, TermGreen);
+
+    // separator
+    c.DrawRectangle(80, 132, w - 160, 1, c.ColorAlpha(TermDark, 0.4));
+
+    // score entries with rank labels
+    const rank_labels = [_][*:0]const u8{ "1st", "2nd", "3rd", "4th", "5th" };
     for (0..save_data.top_scores.len) |i| {
         var line_buf: [64]u8 = undefined;
-        const line = std.fmt.bufPrintZ(&line_buf, "{d}. {d}", .{ i + 1, save_data.top_scores[i] }) catch "";
-        c.DrawText(line.ptr, 220, 200 + @as(i32, @intCast(i)) * 52, 36, TermGreen);
+        const y = 160 + @as(i32, @intCast(i)) * 62;
+
+        // alternating subtle row highlight
+        if (i % 2 == 0) {
+            c.DrawRectangle(80, y - 4, w - 160, 50, c.ColorAlpha(TermGreen, 0.03));
+        }
+
+        // rank
+        c.DrawText(rank_labels[i], 120, y + 8, 22, c.ColorAlpha(TermDim, 0.4));
+
+        // score
+        const score_txt = std.fmt.bufPrintZ(&line_buf, "{d}", .{save_data.top_scores[i]}) catch "";
+        c.DrawText(score_txt.ptr, 200, y + 4, 32, TermGreen);
+
+        // thin line between entries
+        if (i < 4) {
+            c.DrawRectangle(100, y + 52, w - 200, 1, c.ColorAlpha(TermDark, 0.1));
+        }
     }
 
+    // separator
+    c.DrawRectangle(80, 478, w - 160, 1, c.ColorAlpha(TermDark, 0.4));
+
+    // stats — centered
     var stats_buf: [80]u8 = undefined;
     const total_lines = std.fmt.bufPrintZ(&stats_buf, "Total lines cleared: {d}", .{save_data.total_lines}) catch "";
-    c.DrawText(total_lines.ptr, 150, 510, 28, TermGreen);
+    const tl_w = c.MeasureText(total_lines.ptr, 24);
+    c.DrawText(total_lines.ptr, center_x - @divTrunc(tl_w, 2), 502, 24, TermGreen);
 
     const played = std.fmt.bufPrintZ(&stats_buf, "Games played: {d}", .{save_data.games_played}) catch "";
-    c.DrawText(played.ptr, 190, 548, 26, TermDim);
+    const pl_w = c.MeasureText(played.ptr, 22);
+    c.DrawText(played.ptr, center_x - @divTrunc(pl_w, 2), 538, 22, c.ColorAlpha(TermDim, 0.45));
 
-    c.DrawText("M: BACK TO MENU", 176, 640, 24, TermDim);
+    // back hint — centered
+    const hint: [*:0]const u8 = "M  or  BACKSPACE  to return";
+    const hint_w = c.MeasureText(hint, 20);
+    c.DrawText(hint, center_x - @divTrunc(hint_w, 2), 632, 20, c.ColorAlpha(TermDim, 0.35));
 }
 
 pub fn main() !void {
-    const screen_w = 560;
-    const screen_h = 730;
+    const screen_w: i32 = @intFromFloat(VirtualW);
+    const screen_h: i32 = @intFromFloat(VirtualH);
 
+    c.SetConfigFlags(c.FLAG_WINDOW_RESIZABLE);
     c.InitWindow(screen_w, screen_h, "Zig Tetris");
+    c.SetWindowMinSize(280, 365);
     defer c.CloseWindow();
     c.SetTargetFPS(60);
 
+    // render target for virtual canvas
+    const canvas = c.LoadRenderTexture(screen_w, screen_h);
+    defer c.UnloadRenderTexture(canvas);
+
     var save_data = loadSaveData();
     var game = initGame();
-    var scene: Scene = .Menu;
+    var scene: Scene = .Intro;
     var menu_idx: i32 = 0;
+    var intro = IntroState{ .timer = 0, .done = false };
+
+    const intro_duration: f32 = 3.6;
 
     var running = true;
     while (running and !c.WindowShouldClose()) {
         const dt: f32 = c.GetFrameTime();
 
         switch (scene) {
+            .Intro => {
+                intro.timer += dt;
+                // skip on any key or mouse
+                if (c.GetKeyPressed() != 0 or c.IsMouseButtonPressed(c.MOUSE_BUTTON_LEFT)) {
+                    intro.done = true;
+                }
+                if (intro.timer >= intro_duration or intro.done) {
+                    scene = .Menu;
+                }
+            },
             .Menu => {
                 if (c.IsKeyPressed(c.KEY_UP)) {
                     menu_idx = @max(0, menu_idx - 1);
@@ -655,9 +857,28 @@ pub fn main() !void {
                     } else {
                         if (c.IsKeyPressed(c.KEY_A) or c.IsKeyPressed(c.KEY_LEFT)) {
                             _ = movePiece(&game, -1, 0);
+                            game.das_left = DasDelay;
+                        } else if (c.IsKeyDown(c.KEY_A) or c.IsKeyDown(c.KEY_LEFT)) {
+                            game.das_left -= dt;
+                            if (game.das_left <= 0) {
+                                _ = movePiece(&game, -1, 0);
+                                game.das_left = ArrRate;
+                            }
+                        } else {
+                            game.das_left = 0;
                         }
+
                         if (c.IsKeyPressed(c.KEY_D) or c.IsKeyPressed(c.KEY_RIGHT)) {
                             _ = movePiece(&game, 1, 0);
+                            game.das_right = DasDelay;
+                        } else if (c.IsKeyDown(c.KEY_D) or c.IsKeyDown(c.KEY_RIGHT)) {
+                            game.das_right -= dt;
+                            if (game.das_right <= 0) {
+                                _ = movePiece(&game, 1, 0);
+                                game.das_right = ArrRate;
+                            }
+                        } else {
+                            game.das_right = 0;
                         }
                         if (c.IsKeyPressed(c.KEY_W) or c.IsKeyPressed(c.KEY_UP)) {
                             rotatePiece(&game);
@@ -684,12 +905,12 @@ pub fn main() !void {
             },
         }
 
-        c.BeginDrawing();
-        defer c.EndDrawing();
-
+        // --- draw into the virtual canvas ---
+        c.BeginTextureMode(canvas);
         c.ClearBackground(BgColor);
 
         switch (scene) {
+            .Intro => drawIntro(&intro),
             .Menu => drawMenu(menu_idx, &save_data),
             .Scores => drawScores(&save_data),
             .Playing => {
@@ -697,5 +918,24 @@ pub fn main() !void {
                 drawSidePanel(&game, &save_data);
             },
         }
+        c.EndTextureMode();
+
+        // --- scale & center the canvas onto the real window ---
+        c.BeginDrawing();
+        defer c.EndDrawing();
+        c.ClearBackground(c.Color{ .r = 10, .g = 10, .b = 10, .a = 255 });
+
+        const win_w: f32 = @floatFromInt(c.GetScreenWidth());
+        const win_h: f32 = @floatFromInt(c.GetScreenHeight());
+        const scale = @min(win_w / VirtualW, win_h / VirtualH);
+        const dest_w = VirtualW * scale;
+        const dest_h = VirtualH * scale;
+        const pad_x = (win_w - dest_w) * 0.5;
+        const pad_y = (win_h - dest_h) * 0.5;
+
+        // source rect (flip Y because render textures are upside-down in OpenGL)
+        const src = c.Rectangle{ .x = 0, .y = VirtualH, .width = VirtualW, .height = -VirtualH };
+        const dst = c.Rectangle{ .x = pad_x, .y = pad_y, .width = dest_w, .height = dest_h };
+        c.DrawTexturePro(canvas.texture, src, dst, c.Vector2{ .x = 0, .y = 0 }, 0, c.WHITE);
     }
 }
