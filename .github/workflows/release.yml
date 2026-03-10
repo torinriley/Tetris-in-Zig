@@ -75,10 +75,18 @@ jobs:
           Write-Host "Raylib installed to C:\raylib"
           Get-ChildItem C:\raylib -Recurse | Select-Object FullName
 
-      # ── macOS: install via Homebrew ──
+      # ── macOS: build Raylib from source (static) ──
       - name: Install Raylib (macOS)
         if: runner.os == 'macOS'
-        run: brew install raylib
+        run: |
+          git clone --depth 1 --branch ${{ env.RAYLIB_VERSION }} \
+            https://github.com/raysan5/raylib.git /tmp/raylib
+          cmake -S /tmp/raylib -B /tmp/raylib/build \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/opt/homebrew/opt/raylib
+          cmake --build /tmp/raylib/build \
+            --target install -j$(sysctl -n hw.logicalcpu)
 
       # ── Build ──
       - name: Build
@@ -91,7 +99,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path bundle -Force | Out-Null
           Copy-Item zig-out\bin\tetris.exe bundle\
-          Copy-Item raylib.dll            bundle\
+          Copy-Item C:\raylib\lib\raylib.dll bundle\
           Compress-Archive -Path bundle\* -DestinationPath ${{ matrix.archive }}
 
       - name: Package (Linux / macOS)
