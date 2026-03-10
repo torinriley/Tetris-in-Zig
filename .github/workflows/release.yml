@@ -92,6 +92,11 @@ jobs:
       - name: Build
         run: zig build -Doptimize=ReleaseFast
 
+      # ── Sign (macOS ad-hoc) ──
+      - name: Sign binary (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --sign - --force --deep zig-out/bin/tetris
+
       # ── Package ──
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -208,9 +213,10 @@ jobs:
             ```bash
             tar -xzf tetris-macos-*.tar.gz
             chmod +x tetris
+            xattr -d com.apple.quarantine ./tetris  # remove download quarantine flag
             ./tetris
-            # If blocked by Gatekeeper: System Settings → Privacy & Security → Open Anyway
             ```
+            > If you still see a Gatekeeper warning: right-click the binary → Open, or go to System Settings → Privacy & Security → Open Anyway.
 
             ---
 
