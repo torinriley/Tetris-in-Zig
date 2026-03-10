@@ -30,6 +30,8 @@ pub fn build(b: *std.Build) void {
         exe.linkSystemLibrary("rt");
         exe.linkSystemLibrary("X11");
     } else {
+        exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/raylib/include" });
+        exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/raylib/lib" });
         exe.linkSystemLibrary("raylib");
         exe.linkFramework("Cocoa");
         exe.linkFramework("CoreFoundation");
