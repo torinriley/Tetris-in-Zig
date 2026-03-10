@@ -88,14 +88,15 @@ jobs:
           cmake --build /tmp/raylib/build \
             --target install -j$(sysctl -n hw.logicalcpu)
 
+      # ── Windows: convert PNG → ICO ──
+      - name: Generate icon (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: magick convert assets\icon.png -define icon:auto-resize=256,128,64,48,32,16 assets\icon.ico
+
       # ── Build ──
       - name: Build
         run: zig build -Doptimize=ReleaseFast
-
-      # ── Sign (macOS ad-hoc) ──
-      - name: Sign binary (macOS)
-        if: runner.os == 'macOS'
-        run: codesign --sign - --force --deep zig-out/bin/tetris
 
       # ── Package ──
       - name: Package (Windows)
@@ -107,12 +108,52 @@ jobs:
           Copy-Item C:\raylib\lib\raylib.dll bundle\
           Compress-Archive -Path bundle\* -DestinationPath ${{ matrix.archive }}
 
-      - name: Package (Linux / macOS)
-        if: runner.os != 'Windows'
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         run: |
           mkdir bundle
           cp zig-out/bin/tetris bundle/
           tar -czf ${{ matrix.archive }} -C bundle tetris
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Generate .icns from icon.png
+          mkdir -p assets/icon.iconset
+          sips -z 16 16     assets/icon.png --out assets/icon.iconset/icon_16x16.png
+          sips -z 32 32     assets/icon.png --out assets/icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/icon.png --out assets/icon.iconset/icon_32x32.png
+          sips -z 64 64     assets/icon.png --out assets/icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/icon.png --out assets/icon.iconset/icon_128x128.png
+          sips -z 256 256   assets/icon.png --out assets/icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/icon.png --out assets/icon.iconset/icon_256x256.png
+          sips -z 512 512   assets/icon.png --out assets/icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   assets/icon.png --out assets/icon.iconset/icon_512x512.png
+          iconutil -c icns assets/icon.iconset -o assets/icon.icns
+          # Build .app bundle
+          mkdir -p ZTetris.app/Contents/MacOS
+          mkdir -p ZTetris.app/Contents/Resources
+          cp zig-out/bin/tetris    ZTetris.app/Contents/MacOS/tetris
+          cp assets/icon.icns      ZTetris.app/Contents/Resources/tetris.icns
+          cat > ZTetris.app/Contents/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>tetris</string>
+              <key>CFBundleIconFile</key><string>tetris</string>
+              <key>CFBundleIdentifier</key><string>com.torinriley.ztetris</string>
+              <key>CFBundleName</key><string>ZTetris</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>1.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          # Ad-hoc sign the bundle
+          codesign --sign - --force --deep ZTetris.app
+          # Package
+          tar -czf ${{ matrix.archive }} ZTetris.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -212,11 +253,10 @@ jobs:
             **macOS**
             ```bash
             tar -xzf tetris-macos-*.tar.gz
-            chmod +x tetris
-            xattr -d com.apple.quarantine ./tetris  # remove download quarantine flag
-            ./tetris
+            xattr -d com.apple.quarantine ZTetris.app
+            open ZTetris.app
             ```
-            > If you still see a Gatekeeper warning: right-click the binary → Open, or go to System Settings → Privacy & Security → Open Anyway.
+            > If you still see a Gatekeeper warning: right-click `ZTetris.app` → Open, or go to System Settings → Privacy & Security → Open Anyway.
 
             ---
 

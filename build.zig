@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
         exe.linkSystemLibrary("winmm");
         exe.linkSystemLibrary("gdi32");
         exe.linkSystemLibrary("opengl32");
+        exe.addWin32ResourceFile(.{ .file = b.path("assets/icon.rc") });
     } else if (target.result.os.tag == .linux) {
         exe.linkSystemLibrary("raylib");
         exe.linkSystemLibrary("m");
