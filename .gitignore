@@ -4,6 +4,34 @@ zig-out/
 
 # macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# Claude
+.claude/
+
+# Generated icon files (produced by CI)
+assets/icon.ico
+assets/icon.icns
+assets/icon.iconset/
+
+# Raylib DLL (local dev leftover)
+raylib.dll
 
 # Local runtime data
 scores.txt
+
+# Archives / bundles (produced by CI packaging)
+*.tar.gz
+*.zip
+*.app
