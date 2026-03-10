@@ -1,0 +1,320 @@
+name: Publish Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g. 1.0.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  RAYLIB_VERSION: "5.5"
+  ZIG_VERSION: "0.14.0"
+
+jobs:
+  # ────────────────────────────────────────────────
+  # Build all three platforms in parallel
+  # ────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.artifact_name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: tetris-linux-x86_64
+            archive: tetris-linux-x86_64.tar.gz
+
+          - os: windows-latest
+            artifact_name: tetris-windows-x86_64
+            archive: tetris-windows-x86_64.zip
+
+          - os: macos-latest
+            artifact_name: tetris-macos-aarch64
+            archive: tetris-macos-aarch64.tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      # ── Linux: build Raylib from source → /usr/local ──
+      - name: Install Raylib (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential \
+            libgl1-mesa-dev libx11-dev libxi-dev \
+            libxcursor-dev libxrandr-dev libxinerama-dev
+          git clone --depth 1 --branch ${{ env.RAYLIB_VERSION }} \
+            https://github.com/raysan5/raylib.git /tmp/raylib
+          cmake -S /tmp/raylib -B /tmp/raylib/build \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          sudo cmake --build /tmp/raylib/build \
+            --target install -j$(nproc)
+
+      # ── Windows: download pre-built MinGW package → C:\raylib ──
+      - name: Install Raylib (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/raysan5/raylib/releases/download/$env:RAYLIB_VERSION/raylib-$env:RAYLIB_VERSION`_win64_mingw-w64.zip"
+          Invoke-WebRequest -Uri $url -OutFile raylib.zip
+          Expand-Archive -Path raylib.zip -DestinationPath C:\raylib_src
+          $inner = Get-ChildItem C:\raylib_src | Select-Object -First 1
+          New-Item -ItemType Directory -Path C:\raylib -Force | Out-Null
+          Copy-Item "$($inner.FullName)\include" C:\raylib\include -Recurse -Force
+          Copy-Item "$($inner.FullName)\lib"     C:\raylib\lib     -Recurse -Force
+
+      # ── Windows: convert PNG → ICO ──
+      - name: Generate icon (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: magick convert assets\icon.png -define icon:auto-resize=256,128,64,48,32,16 assets\icon.ico
+
+      # ── macOS: build Raylib from source (static) ──
+      - name: Install Raylib (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          git clone --depth 1 --branch ${{ env.RAYLIB_VERSION }} \
+            https://github.com/raysan5/raylib.git /tmp/raylib
+          cmake -S /tmp/raylib -B /tmp/raylib/build \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/opt/homebrew/opt/raylib
+          cmake --build /tmp/raylib/build \
+            --target install -j$(sysctl -n hw.logicalcpu)
+
+      # ── Build ──
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast
+
+      # ── Package ──
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path bundle -Force | Out-Null
+          Copy-Item zig-out\bin\tetris.exe bundle\
+          Copy-Item C:\raylib\lib\raylib.dll bundle\
+          Compress-Archive -Path bundle\* -DestinationPath ${{ matrix.archive }}
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir bundle
+          cp zig-out/bin/tetris bundle/
+          tar -czf ${{ matrix.archive }} -C bundle tetris
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Generate .icns from icon.png
+          mkdir -p assets/icon.iconset
+          sips -z 16 16     assets/icon.png --out assets/icon.iconset/icon_16x16.png
+          sips -z 32 32     assets/icon.png --out assets/icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/icon.png --out assets/icon.iconset/icon_32x32.png
+          sips -z 64 64     assets/icon.png --out assets/icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/icon.png --out assets/icon.iconset/icon_128x128.png
+          sips -z 256 256   assets/icon.png --out assets/icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/icon.png --out assets/icon.iconset/icon_256x256.png
+          sips -z 512 512   assets/icon.png --out assets/icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   assets/icon.png --out assets/icon.iconset/icon_512x512.png
+          iconutil -c icns assets/icon.iconset -o assets/icon.icns
+          # Build .app bundle
+          mkdir -p ZTetris.app/Contents/MacOS
+          mkdir -p ZTetris.app/Contents/Resources
+          cp zig-out/bin/tetris    ZTetris.app/Contents/MacOS/tetris
+          cp assets/icon.icns      ZTetris.app/Contents/Resources/tetris.icns
+          cat > ZTetris.app/Contents/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>tetris</string>
+              <key>CFBundleIconFile</key><string>tetris</string>
+              <key>CFBundleIdentifier</key><string>com.torinriley.ztetris</string>
+              <key>CFBundleName</key><string>ZTetris</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>${{ github.event.inputs.version }}</string>
+              <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          # Ad-hoc sign the bundle
+          codesign --sign - --force --deep ZTetris.app
+          # Package
+          tar -czf ${{ matrix.archive }} ZTetris.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────
+  # Tag, checksum, and publish the GitHub release
+  # ────────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        id: checksums
+        run: |
+          cd artifacts
+          sha256sum * | tee SHA256SUMS.txt
+          {
+            echo "sums<<EOF"
+            cat SHA256SUMS.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s (%h)" --no-merges)
+          else
+            LOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          {
+            echo "log<<EOF"
+            echo "$LOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Collect contributors
+        id: contributors
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            CONTRIB=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%an" \
+              --no-merges | sort -u | sed 's/^/@/' | tr '\n' ', ' | sed 's/, $//')
+          else
+            CONTRIB=$(git log --pretty=format:"%an" \
+              --no-merges | sort -u | sed 's/^/@/' | tr '\n' ', ' | sed 's/, $//')
+          fi
+          {
+            echo "list<<EOF"
+            echo "$CONTRIB"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create and push release tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ github.event.inputs.version }}" \
+            -m "Release v${{ github.event.inputs.version }}"
+          git push origin "v${{ github.event.inputs.version }}"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: ZTetris v${{ github.event.inputs.version }}
+          prerelease: ${{ github.event.inputs.prerelease }}
+          draft: false
+          generate_release_notes: false
+          body: |
+            ## ZTetris v${{ github.event.inputs.version }}
+
+            > Built from [`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+
+            ---
+
+            ### What's changed
+
+            ${{ steps.changelog.outputs.log }}
+
+            ---
+
+            ### Contributors
+
+            ${{ steps.contributors.outputs.list }}
+
+            ---
+
+            ### Downloads
+
+            | Platform | Architecture | File |
+            |---|---|---|
+            | 🪟 Windows | x86-64 | `tetris-windows-x86_64.zip` |
+            | 🐧 Linux | x86-64 | `tetris-linux-x86_64.tar.gz` |
+            | 🍎 macOS | Apple Silicon (ARM64) | `tetris-macos-aarch64.tar.gz` |
+
+            ---
+
+            ### Checksums (SHA256)
+
+            ```
+            ${{ steps.checksums.outputs.sums }}
+            ```
+
+            ---
+
+            ### How to install
+
+            **🪟 Windows**
+            1. Download and extract `tetris-windows-x86_64.zip`
+            2. Keep `raylib.dll` in the same folder as `tetris.exe`
+            3. Double-click `tetris.exe` or run it from a terminal
+
+            **🐧 Linux**
+            ```bash
+            tar -xzf tetris-linux-x86_64.tar.gz
+            chmod +x tetris
+            ./tetris
+            ```
+
+            **🍎 macOS**
+            ```bash
+            tar -xzf tetris-macos-*.tar.gz
+            xattr -d com.apple.quarantine ZTetris.app
+            open ZTetris.app
+            ```
+            > If Gatekeeper still blocks it: right-click `ZTetris.app` → Open, or System Settings → Privacy & Security → Open Anyway.
+
+            ---
+
+            > Built with **Zig ${{ env.ZIG_VERSION }}** · **Raylib ${{ env.RAYLIB_VERSION }}**
+            >
+            > Found a bug? [Open an issue](${{ github.server_url }}/${{ github.repository }}/issues/new/choose)
+          files: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS.txt
